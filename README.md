@@ -25,7 +25,7 @@ It runs entirely on the server backend to validate player behavior, detect unaut
 
 ## 🚀 Installation (For Server Owners)
 
-1. Download the latest `ShedSecurity.zip` from the [Releases](link-to-releases) page.
+1. Download the latest `ShedSecurity.zip` from the [Releases](ShedSecurity) page.
 2. Drop the `.zip` file directly into your Vintage Story server's `Mods` folder.
 3. Restart your server. 
 4. *(Optional)* Configure your violation thresholds and approved mod lists in the `ModConfig/shedsecurity.json` file generated after the first boot.
