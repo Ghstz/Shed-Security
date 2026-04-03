@@ -1,6 +1,7 @@
 # Shed Security 🛡️
 
 **Shed Security** is a lightweight, highly optimized server-side anti-cheat and administration mod for Vintage Story (v1.19 - v1.22+). 
+
 https://mods.vintagestory.at/show/mod/39745
 
 It runs entirely on the server backend to validate player behavior, detect unauthorized client modifications, and provide server administrators with peace of mind—without impacting server tick rates.
