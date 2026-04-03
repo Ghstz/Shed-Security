@@ -1,0 +1,13 @@
+{
+  "type": "code",
+  "modid": "shedsecurity",
+  "name": "Shed Security",
+  "authors": ["Suja"], 
+  "description": "Advanced anti-cheat with Admin Tools",
+  "version": "1.4.9",
+  "requiredOnClient": false,
+  "requiredOnServer": true,
+  "dependencies": {
+    "game": "1.19.0" 
+  }
+}

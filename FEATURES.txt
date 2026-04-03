@@ -1,0 +1,544 @@
+================================================================================
+  SHED SECURITY v1.4.7 — Complete Feature Reference
+  Vintage Story Server-Side Anti-Cheat & Admin Toolkit
+  API: v1.19 | Runtime: .NET 8.0
+================================================================================
+
+
+================================================================================
+  TABLE OF CONTENTS
+================================================================================
+
+  1.  Anti-Cheat Detection Systems
+  2.  Admin Commands (/shed)
+  3.  Standalone Commands
+  4.  Chat Moderation
+  5.  Mining Intelligence & Heuristics
+  6.  Combat Log System
+  7.  Stealth & Vanish System
+  8.  Moderation Tools (Freeze, Shadowban, Mute)
+  9.  Client Mod Scanner
+  10. Persistence & Data Files
+  11. Discord Integration
+  12. Configuration Reference
+  13. Player Override System
+  14. Immunity & Bypass Privileges
+  15. Logging & Log Rotation
+  16. Update Checker
+  17. File Structure
+
+
+================================================================================
+  1. ANTI-CHEAT DETECTION SYSTEMS
+================================================================================
+
+--- Speed / Fly Detection ---
+  Toggle:         EnableSpeedChecks (config)
+  Method:         OnCheckPlayerMovement() — ticks every 500ms
+  How it works:   Compares player position between ticks. Calculates horizontal
+                  and vertical speed from distance/dt. Factors in walkspeed stat,
+                  sprint multiplier, and jump state.
+  Limits:         Horizontal: (walkspeed * 1.2) + MaxHorizontalSpeed
+                  Vertical:   MaxVerticalSpeed + 3.0 (+ 5.0 if jumping)
+  Action:         Teleports player back to last valid position + adds strike.
+  Config keys:    MaxHorizontalSpeed (default 6.0)
+                  MaxVerticalSpeed (default 2.5)
+  Exemptions:     Admins, bypass privilege, creative/spectator mode, mounted
+                  players, flying players, login grace period (15s), teleport
+                  grace period, low TPS / server stutter (dt > 1.0).
+
+--- TPS Monitor (False-Positive Prevention) ---
+  Method:         Top of OnCheckPlayerMovement()
+  How it works:   Estimates server TPS as 30.0 * (0.5 / dt). If TPS drops below
+                  MinServerTPS OR dt exceeds 1.0 second, ALL movement checks are
+                  suspended for that tick. Player last-positions are updated
+                  before returning to prevent the next tick from seeing a large
+                  stale delta.
+  Config key:     MinServerTPS (default 15.0)
+
+--- NoClip / Wall Check ---
+  Toggle:         EnableNoClipCheck (config)
+  Method:         Inside OnCheckPlayerMovement()
+  How it works:   Checks the block at the player's eye-level position. If that
+                  block is fully solid (SideSolid.All), not liquid, and not air,
+                  the player is teleported back to their last valid position.
+  Action:         Silent teleport-back (no strike added).
+
+--- Anti-Nuker / FastBreak ---
+  Toggle:         EnableAntiNuker (config)
+  Method:         OnPlayerBreakBlock()
+  How it works:   Counts blocks broken per second per player (breakCount dict,
+                  reset every 1s by OnResetActionCounts). If count exceeds
+                  MaxBlocksBrokenPerSecond, block break is prevented and a strike
+                  is added on the first excess break.
+  Foliage Bypass: Blocks with paths containing "leaves", "tallgrass", or "vine"
+                  completely skip the break count and limit checks. This prevents
+                  false-positives from shears instantly breaking tree canopies.
+  Config key:     MaxBlocksBrokenPerSecond (default 75)
+
+--- Anti-Printer / FastPlace ---
+  Toggle:         EnableAntiPrinter (config)
+  Method:         OnPlayerPlaceBlock()
+  How it works:   Counts blocks placed per second per player (placeCount dict,
+                  reset every 1s). If count exceeds MaxBlocksPlacedPerSecond,
+                  a strike is added.
+  Config key:     MaxBlocksPlacedPerSecond (default 8)
+
+--- Reach Check ---
+  Toggle:         Always active (no separate toggle)
+  Methods:        OnPlayerBreakBlock(), OnPlayerPlaceBlock()
+  How it works:   Calculates 3D Euclidean distance between the player's position
+                  and the center of the target block. If distance exceeds
+                  MaxBlockReach, the action is prevented and a strike is added.
+  Config key:     MaxBlockReach (default 6.5)
+
+--- Teleport Grace ---
+  How it works:   If squared distance between ticks exceeds TeleportGraceDistance²,
+                  movement checks are suspended for TeleportGraceMs. Also applied
+                  on player join. Prevents /tp, /home, etc. from triggering speed
+                  detection.
+  Config keys:    TeleportGraceMs (default 3000)
+                  TeleportGraceDistance (default 24.0)
+
+--- Reconnect Throttle ---
+  Method:         OnPlayerJoin()
+  How it works:   Tracks join timestamps by IP. If a player reconnects within
+                  3 seconds, they are immediately disconnected.
+
+
+================================================================================
+  2. ADMIN COMMANDS (/shed)
+================================================================================
+
+  All /shed commands require the "controlserver" privilege.
+  All commands are audit-logged when EnableAdminAuditLog is true.
+
+  /shed reload
+    Reloads the anticheat-config.json from disk.
+
+  /shed status
+    Displays a summary dashboard: mod version, online count, strike totals,
+    frozen/shadowbanned/vanished/muted/combat-tagged player counts, and the
+    on/off state of each detection system.
+
+  /shed strikes
+    Lists the top 20 players by strike count.
+
+  /shed clear <playername>
+    Resets a player's strike count to 0 and removes any active shadowban.
+
+  /shed freeze <playername>
+    Toggles freeze on a player. Frozen players:
+      - Cannot move (teleported back each tick)
+      - Cannot chat
+      - Cannot break or place blocks
+
+  /shed shadowban <playername>
+    Toggles shadowban on a player. Shadowbanned players:
+      - Cannot break blocks (silently prevented)
+      - Cannot place blocks (silently reverted)
+      - Deal 0 damage (implicitly)
+
+  /shed mute <player> [minutes]
+    Mutes a player for the given duration (default 5 minutes). Muted players
+    cannot send chat messages and see a countdown of remaining time.
+
+  /shed unmute <player>
+    Removes an active mute from a player.
+
+  /shed vanish
+    Toggles vanish mode for the calling admin. See section 7 for details.
+
+  /shed invsee <playername>
+    Displays the contents of a player's hotbar (slot index, stack size, name).
+
+  /shed wipeinv <playername>
+    Clears a player's hotbar, backpack, and character inventory entirely.
+
+  /shed whois <playername>
+    Displays a player profile: masked IP (first two octets), ping, game mode,
+    alive status, position, and current strike count.
+
+  /shed alert <message>
+    Broadcasts a server-wide alert message to all players.
+
+  /shed kickall
+    Disconnects every online player except the admin who issued the command.
+
+  /shed restart
+    Gracefully restarts the server: kicks all other players with a message,
+    then executes the /stop command after a 1-second delay.
+
+
+================================================================================
+  3. STANDALONE COMMANDS
+================================================================================
+
+  /shedchat <message>
+    Privilege: controlserver
+    Private staff-only chat channel. Messages are only visible to players with
+    the controlserver privilege.
+
+  /sreport <player> <reason>
+    Privilege: chat (any player)
+    Submits a player report. The report is logged, sent to Discord, and alerted
+    to all online admins.
+
+  /online
+    Privilege: chat (any player)
+    Lists online players. Vanished admins are hidden from non-admin callers.
+    Admins see vanished players marked with [VANISHED].
+
+
+================================================================================
+  4. CHAT MODERATION
+================================================================================
+
+  Method:         OnPlayerChat()
+  Processing order:
+
+  1. Freeze Check  — Frozen players cannot chat at all.
+  2. Mute Check    — Muted players see remaining time and message is consumed.
+  3. Word Filter   — Checks message against BannedWords list (case-insensitive
+                     substring match). Blocked messages show a warning.
+  4. Anti-Spam     — Blocks identical consecutive messages (case-insensitive).
+  5. Rate Limit    — Enforces ChatCooldownMs between messages.
+
+  Admins and bypass-privileged players are exempt from steps 4 and 5.
+  The word filter (step 3) applies to everyone.
+
+  Config keys:    BannedWords (list of strings)
+                  ChatCooldownMs (default 1000)
+
+
+================================================================================
+  5. MINING INTELLIGENCE & HEURISTICS
+================================================================================
+
+--- X-Ray Ratio Detection ---
+  Toggle:         EnableHeuristics (config)
+  Method:         OnPlayerBreakBlock()
+  How it works:   Tracks per-player counts of stone mined (rock, soil, gravel,
+                  sand) vs. rare ores mined. Once total blocks exceed
+                  MinBlocksForRatio, calculates oresMined/total ratio. If ratio
+                  exceeds XRayRatioThreshold, an alert is sent to admins, Discord,
+                  and the log. Counts are halved after each alert to prevent spam
+                  while still re-triggering if behavior continues.
+  Dense Ore Skip: Ores in the DenseOres list are excluded from the ratio to
+                  avoid false positives from naturally abundant deposits.
+  Config keys:    XRayRatioThreshold (default 0.15 = 15%)
+                  MinBlocksForRatio (default 100)
+                  RareOres (list), DenseOres (list)
+
+--- Ore Alert Batching ---
+  Method:         HandleOreBatching(), FlushMiningSession(), ProcessOreQueue()
+  How it works:   When a player mines a rare ore, instead of alerting immediately,
+                  the mod batches consecutive same-ore breaks. After
+                  OreAlertBatchSeconds of inactivity or a different ore type, the
+                  batch is flushed and a single summary alert is sent
+                  (e.g., "Player found 12x Native Gold Ore").
+  Config key:     OreAlertBatchSeconds (default 5.0)
+
+--- Ore Vein Fingerprinting ---
+  Toggle:         EnableOreVeinFingerprint (config)
+  Method:         TrackOreVeinPattern() → OreVeinFeature.Track()
+  How it works:   Records the 3D positions of rare ore breaks within a sliding
+                  time window. Clusters ore breaks by proximity (OreVeinMinDistance).
+                  If a player mines from OreVeinDistinctVeinsAlert or more
+                  distinct vein clusters within OreVeinWindowSeconds, it flags
+                  suspicious multi-vein pathing (potential X-Ray) and adds a
+                  strike.
+  Config keys:    OreVeinWindowSeconds (default 180)
+                  OreVeinMinDistance (default 10.0)
+                  OreVeinDistinctVeinsAlert (default 4)
+                  OreVeinMinimumRareOres (default 8)
+
+
+================================================================================
+  6. COMBAT LOG SYSTEM
+================================================================================
+
+  Toggle:         EnableCombatLog (config)
+  Class:          CombatLogFeature
+  Method:         UpdateCombatTag() — called every movement tick (500ms)
+  How it works:   Monitors player health via WatchedAttributes. If health drops,
+                  the player is combat-tagged for CombatTagSeconds. If a
+                  combat-tagged player disconnects, a "COMBAT LOG" alert is sent
+                  to the log and Discord.
+  Config key:     CombatTagSeconds (default 20)
+
+
+================================================================================
+  7. STEALTH & VANISH SYSTEM
+================================================================================
+
+  Command:        /shed vanish (toggle)
+  Class:          StealthNetworkFeature
+  Methods:        HidePlayerEntity(), ShowPlayerEntity()
+
+  Vanish ON:
+    - Admin's game mode is set to Spectator.
+    - A fake "Player left the game" message is broadcast.
+    - The admin's entity is removed from all other players' tracked entity
+      lists via reflection (ConnectedClient internals). This makes the admin
+      completely invisible — no nametag, no model, no collision.
+    - New players joining while an admin is vanished also have the entity
+      hidden from them.
+    - The /online command hides vanished admins from non-admin callers.
+
+  Vanish OFF:
+    - Game mode restored to Survival.
+    - Entity re-added to all players' tracked lists.
+    - A fake "Player joined the game" message is broadcast.
+
+
+================================================================================
+  8. MODERATION TOOLS
+================================================================================
+
+--- Freeze ---
+  Persisted:      Yes (shed-state.json)
+  Effects:        Cannot move, cannot chat, cannot break/place blocks.
+  Mechanism:      Movement tick teleports frozen players back. Chat handler
+                  blocks messages. Block events check frozenPlayers set.
+
+--- Shadowban ---
+  Persisted:      Yes (shed-state.json)
+  Effects:        Block breaks silently prevented. Block places silently
+                  reverted (block set to air, slot re-dirtied). Intended to
+                  make cheaters think they are playing normally while having
+                  no impact on the server.
+
+--- Mute ---
+  Persisted:      Yes (shed-mutes.json, stored as UID → expiry timestamp)
+  Effects:        Chat messages consumed. Player sees remaining mute time.
+                  Auto-expires when the timer runs out.
+
+
+================================================================================
+  9. CLIENT MOD SCANNER
+================================================================================
+
+  Class:          StealthNetworkFeature
+  Method:         ScanPlayerMods() — runs 5 seconds after player join
+  How it works:   Uses reflection to access the player's ConnectedClient object
+                  and enumerate their client-side mod list. Compares each mod ID
+                  against the BlacklistedClientMods config list (case-insensitive
+                  substring match). On match, alerts admins, logs, and sends a
+                  Discord notification.
+  Exemptions:     Players with controlserver privilege are not scanned.
+  Config key:     BlacklistedClientMods (default: ["blockoverlay", "xray", "freecam"])
+  Note:           Relies on reflection into VS internals; field names may change
+                  between VS versions.
+
+
+================================================================================
+  10. PERSISTENCE & DATA FILES
+================================================================================
+
+  All files stored in: <GameData>/ModData/
+
+  shed-strikes.json
+    Format:       Dictionary<string, StrikeInfo> (UID → {Username, Count})
+    Loaded:       On server start
+    Saved:        After every strike change and /shed clear
+
+  shed-mutes.json
+    Format:       Dictionary<string, long> (UID → expiry in ElapsedMilliseconds)
+    Loaded:       On server start
+    Saved:        After mute/unmute and auto-expiry
+
+  shed-state.json
+    Format:       PersistedState { ShadowBanned: HashSet, Frozen: HashSet }
+    Loaded:       On server start
+    Saved:        After freeze/shadowban/clear toggling
+
+  anticheat-config.json
+    Location:     VS ModConfig directory (managed by sapi.LoadModConfig)
+    Auto-created: On first run with sensible defaults
+    Auto-patched: Missing/invalid fields are filled in and re-saved
+
+
+================================================================================
+  11. DISCORD INTEGRATION
+================================================================================
+
+  Toggle:         EnableDiscordAlerts (config)
+  Config key:     DiscordWebhookUrl (webhook URL string)
+  Method:         SendDiscordAlert()
+  How it works:   POSTs a JSON payload { "content": message } to the configured
+                  Discord webhook URL. Runs on a background Task.Run to avoid
+                  blocking the game thread.
+  Events sent:    Strike threshold reached, X-Ray ratio alert, ore vein pattern,
+                  combat log disconnect, player reports, blacklisted mod detected,
+                  mining alerts.
+
+
+================================================================================
+  12. CONFIGURATION REFERENCE (anticheat-config.json)
+================================================================================
+
+  KEY                         TYPE        DEFAULT     DESCRIPTION
+  ─────────────────────────── ─────────── ─────────── ──────────────────────────
+  ConfigVersion               string      ""          Auto-set to mod version
+  EnableHeuristics            bool        true        X-Ray ratio detection
+  EnableAutoKick              bool        false       Kick on max strikes (false = alert only)
+  EnableSpeedChecks           bool        true        Speed/fly detection
+  EnableNoClipCheck           bool        true        Wall/noclip detection
+  EnableAntiNuker             bool        true        Fast block-break detection
+  EnableAntiPrinter           bool        true        Fast block-place detection
+  OreAlertBatchSeconds        double      5.0         Ore mining alert batch window
+
+  XRayRatioThreshold          double      0.15        Ore-to-total ratio for X-Ray flag
+  MinBlocksForRatio           int         100         Min blocks before ratio check
+
+  MaxHorizontalSpeed          double      6.0         Added to walkspeed for speed limit
+  MaxVerticalSpeed            double      2.5         Base vertical speed limit
+  MaxStrikesBeforeKick        int         10          Strikes before kick/alert
+  MaxBlocksBrokenPerSecond    int         75          Nuker threshold
+  MaxBlocksPlacedPerSecond    int         8           Printer threshold
+  MinServerTPS                double      15.0        TPS below which checks suspend
+  MaxBlockReach               double      6.5         Max block interaction distance
+
+  DiscordWebhookUrl           string      ""          Discord webhook endpoint
+  EnableDiscordAlerts         bool        false       Toggle Discord integration
+
+  RareOres                    string[]    [...]       Ore code substrings for tracking
+  DenseOres                   string[]    [...]       Ores excluded from X-Ray ratio
+  BannedWords                 string[]    [...]       Chat filter word list
+  BlacklistedClientMods       string[]    [...]       Mod IDs to flag on join
+
+  ChatCooldownMs              int         1000        Min ms between chat messages
+  MaxLogFileSizeMB            double      5.0         Log rotation threshold
+  MaxLogBackups               int         3           Number of rotated log files kept
+
+  EnableCombatLog             bool        true        Combat tag system toggle
+  CombatTagSeconds            int         20          Duration of combat tag
+  TeleportGraceMs             int         3000        Grace period after teleport
+  TeleportGraceDistance       double      24.0        Distance to trigger tp grace
+  EnableOreVeinFingerprint    bool        true        Ore vein clustering detection
+  OreVeinWindowSeconds        int         180         Sliding window for vein tracking
+  OreVeinMinDistance          double      10.0        Min distance between vein clusters
+  OreVeinDistinctVeinsAlert   int         4           Cluster count to flag
+  OreVeinMinimumRareOres      int         8           Min ore breaks before analysis
+
+  EnableAdminAuditLog         bool        true        Log admin command usage
+  PlayerOverrides             dict        {}          Per-player threshold overrides
+
+
+================================================================================
+  13. PLAYER OVERRIDE SYSTEM
+================================================================================
+
+  Class:          PlayerOverrideFeature
+  Config key:     PlayerOverrides (Dictionary<string, PlayerOverrideConfig>)
+
+  Allows per-player thresholds keyed by PlayerUID, PlayerName, or lowercase
+  PlayerName. Overridable fields:
+
+    MaxHorizontalSpeed, MaxVerticalSpeed, MaxStrikesBeforeKick,
+    MaxBlocksBrokenPerSecond, MaxBlocksPlacedPerSecond, ChatCooldownMs,
+    MaxBlockReach
+
+  If a field is null in the override, the global config value is used.
+
+  Example config entry:
+    "PlayerOverrides": {
+      "SomePlayerName": {
+        "MaxBlocksBrokenPerSecond": 150,
+        "MaxStrikesBeforeKick": 20
+      }
+    }
+
+
+================================================================================
+  14. IMMUNITY & BYPASS PRIVILEGES
+================================================================================
+
+  controlserver privilege:
+    - Exempt from all anti-cheat checks (speed, nuker, printer, reach, chat
+      rate limit, chat spam, reconnect throttle).
+    - Not scanned for blacklisted client mods.
+    - Can use all /shed commands.
+    - Receives admin alerts (X-Ray, mining, reports, mod scanner, strikes).
+    - Sees vanished players in /online.
+
+  shedsecurity.bypass privilege:
+    - Same anti-cheat exemptions as controlserver.
+    - Does NOT grant access to /shed commands.
+    - Skips reconnect throttle on join.
+    - Useful for bots or trusted players who need relaxed limits without
+      full admin access.
+
+
+================================================================================
+  15. LOGGING & LOG ROTATION
+================================================================================
+
+  Log file:       <GameData>/Logs/shed-security.log
+  Method:         LogSecurity() — writes timestamped entries
+  Rotation:       LogMaintenanceFeature.Rotate()
+                  When log exceeds MaxLogFileSizeMB, files are rotated:
+                  shed-security.log → .1, .1 → .2, etc. up to MaxLogBackups.
+  Config keys:    MaxLogFileSizeMB (default 5.0)
+                  MaxLogBackups (default 3)
+
+
+================================================================================
+  16. UPDATE CHECKER
+================================================================================
+
+  Method:         CheckForUpdates() — runs once on server start (async)
+  Endpoint:       http://mods.vintagestory.at/api/mod/shedsecurity
+  How it works:   Fetches the mod page JSON, parses "modversion" field, compares
+                  with local ModVersion. If a newer version exists, stores it and
+                  notifies admins on their next join.
+
+
+================================================================================
+  17. FILE STRUCTURE
+================================================================================
+
+  AntiCheatConfig.cs              Config model + PlayerOverrideConfig model
+  AntiCheatSystem.cs              Main ModSystem: lifecycle, config loading,
+                                  event registration, disconnect cleanup,
+                                  logging, update checker
+  AntiCheatSystem.Commands.cs     All /shed subcommand handlers, /shedchat,
+                                  /sreport, /online
+  AntiCheatSystem.Detection.cs    All detection logic: movement checks, block
+                                  break/place handlers, chat moderation, ore
+                                  batching, TPS monitor
+  AntiCheatSystem.Helpers.cs      Strike system, Discord sender, persistence
+                                  I/O, player override getters, utility helpers,
+                                  feature delegator wrappers
+  FeatureModels.cs                OreBreakPoint, PersistedState data classes
+  CombatLogFeature.cs             Combat tag health monitoring
+  LogMaintenanceFeature.cs        Log file rotation
+  OreVeinFeature.cs               Ore vein clustering analysis
+  PlayerOverrideFeature.cs        Per-player config override resolution
+  StatePersistenceFeature.cs      Freeze/shadowban state load/save
+  StatusReportFeature.cs          /shed status and /shed strikes report builders
+  StealthNetworkFeature.cs        Vanish entity hiding, client mod scanning
+  modinfo.json                    Mod metadata (id: shedsecurity)
+  VS Anticheat.csproj             Build configuration (.NET 8.0)
+  VS Anticheat.sln                Solution file
+
+================================================================================
+  STRIKE SYSTEM SUMMARY
+================================================================================
+
+  Violations that add strikes:
+    - Nuker / FastBreak (exceeding MaxBlocksBrokenPerSecond)
+    - FastPlace / Printer (exceeding MaxBlocksPlacedPerSecond)
+    - Reach (BlockBreak) (block distance > MaxBlockReach)
+    - Reach (BlockPlace) (block distance > MaxBlockReach)
+    - Unfair Advantage (Speed/Fly) (exceeding speed limits)
+    - Suspicious multi-vein ore pathing (ore vein fingerprint)
+
+  When strikes reach MaxStrikesBeforeKick:
+    - If EnableAutoKick = true:  Player is kicked, strikes reset to 0.
+    - If EnableAutoKick = false: Alert sent to admins + Discord only.
+
+  Players are warned in-game after each strike: "Abnormal behavior detected! (X/Y)"
+
+================================================================================
